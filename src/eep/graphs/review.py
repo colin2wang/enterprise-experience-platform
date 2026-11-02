@@ -13,12 +13,15 @@ Author: Wang, Bing <colin2wang@gmail.com>
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
+from eep.ai_providers.llm_log import invoke_llm
 from eep.schemas import ReviewSubmit
 
 logger = logging.getLogger(__name__)
@@ -33,9 +36,12 @@ class ReviewState(TypedDict, total=False):
     draft: dict[str, Any]           # candidate experience awaiting verdict
     similar: list[dict[str, Any]]   # formal-layer neighbors shown to the reviewer
     suggestions: list[str]
+    suggestions_from_store: bool    # suggestions loaded from Extraction.draft_json
     decision: dict[str, Any]        # ReviewSubmit payload from the reviewer
     outcome: str                    # promoted | rejected | failed
     change_log: list[dict[str, Any]]
+    factory: Any                    # ModelFactory (injected by the API layer)
+    semaphores: Any                 # ProviderSemaphores (injected by the API layer)
 
 
 # --------------------------------------------------------------------- #
@@ -56,17 +62,72 @@ async def retrieve_similar(state: ReviewState) -> dict[str, Any]:
     return {}
 
 
-async def suggest_edits(state: ReviewState) -> dict[str, Any]:
-    """LLM-suggested field fixes (strong model, role='extractor').
-
-    Suggestions are advisory only; the reviewer makes the final call.
-    """
-    draft = state.get("draft", {})
+def _rule_suggestions(draft: dict[str, Any]) -> list[str]:
+    """Deterministic checks that never require an LLM."""
     suggestions: list[str] = []
     if not draft.get("source", {}).get("span", {}).get("quote"):
         suggestions.append("Missing source quote: verify the span before accepting.")
     if draft.get("type") == "action" and not draft.get("owner_hint"):
         suggestions.append("No owner hint: item will show as 'unclaimed'.")
+    return suggestions
+
+
+def _parse_suggestions(raw: str) -> list[str]:
+    """Parse the LLM reply into at most 5 suggestion strings; never raises."""
+    try:
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE)
+        data = json.loads(text)
+        items = data.get("suggestions") if isinstance(data, dict) else data
+        return [str(s) for s in items if isinstance(s, str) and s.strip()][:5]
+    except Exception:  # noqa: BLE001 - suggestions are advisory only
+        return []
+
+
+async def suggest_edits(state: ReviewState) -> dict[str, Any]:
+    """LLM-suggested field fixes (strong model, role='extractor').
+
+    Rule-based checks always run; the LLM adds advisory suggestions on top.
+    Suggestions generated on a previous queue visit are persisted in
+    ``Extraction.draft_json`` and replayed via ``suggestions_from_store`` —
+    the LLM is called at most once per draft. Any LLM failure degrades
+    gracefully to rules-only output. Suggestions are advisory only; the
+    reviewer makes the final call.
+    """
+    draft = state.get("draft", {})
+    if state.get("suggestions_from_store"):
+        # Already contains rule-based + LLM suggestions from the first run.
+        return {"suggestions": state.get("suggestions", [])}
+
+    suggestions = _rule_suggestions(draft)
+
+    factory = state.get("factory")
+    sems = state.get("semaphores")
+    if factory is None or sems is None:  # tests / bare invocation
+        return {"suggestions": suggestions}
+
+    try:
+        llm = factory.get_chat_model("extractor")
+
+        async def _call() -> str:
+            messages = [
+                (
+                    "system",
+                    "You review a draft experience-unit before human acceptance. "
+                    "Point out concrete field-level problems only (title clarity, "
+                    "type mismatch, missing span evidence, risky wording). "
+                    "Never invent facts. Return JSON: {\"suggestions\": [\"...\"]}. "
+                    "Return an empty list when the draft looks fine.",
+                ),
+                ("user", json.dumps(draft, ensure_ascii=False, default=str)),
+            ]
+            resp = await invoke_llm("review.suggest_edits", "extractor", llm, messages)
+            return str(resp.content)
+
+        raw = await sems.run("lmstudio-local", _call)
+        suggestions.extend(s for s in _parse_suggestions(raw) if s not in suggestions)
+    except Exception:  # noqa: BLE001 - advisory feature must not break review
+        logger.exception("LLM suggestion failed for draft review; keeping rule-based only")
+
     return {"suggestions": suggestions}
 
 

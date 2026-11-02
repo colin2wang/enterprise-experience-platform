@@ -12,10 +12,14 @@ Author: Wang, Bing <colin2wang@gmail.com>
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+
+from eep.ai_providers.llm_log import invoke_llm
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,8 @@ class BriefingState(TypedDict, total=False):
     decision_quotes: Annotated[list[dict[str, Any]], _append_unique]
     open_actions: Annotated[list[dict[str, Any]], _append_unique]
     briefing_markdown: str
-    factory: Any
+    factory: Any                    # ModelFactory (injected by the API layer)
+    semaphores: Any                 # ProviderSemaphores (injected by the API layer)
 
 
 async def gather_attention(state: BriefingState) -> dict[str, Any]:
@@ -64,12 +69,8 @@ async def retrieve_open_actions(task: dict[str, Any]) -> dict[str, Any]:
     return {"open_actions": []}
 
 
-async def compose_briefing(state: BriefingState) -> dict[str, Any]:
-    """Render the briefing template; pure deterministic composition.
-
-    Every line links back to its source meeting. LLM compression is optional
-    and never introduces facts; Phase 1 uses the template directly.
-    """
+def _render_template(state: BriefingState) -> str:
+    """Deterministic briefing; every line links back to its source meeting."""
     lines: list[str] = ["# Pre-meeting briefing", ""]
     lines.append("## Needs confirmation this time")
     for item in state.get("attention", []):
@@ -85,7 +86,46 @@ async def compose_briefing(state: BriefingState) -> dict[str, Any]:
     for a in state.get("open_actions", []):
         due = a.get("due_date") or "TBD"
         lines.append(f"- {a.get('title', '')} — owner {a.get('owner_name') or 'unclaimed'}, due {due}")
-    return {"briefing_markdown": "\n".join(lines)}
+    return "\n".join(lines)
+
+
+async def compose_briefing(state: BriefingState) -> dict[str, Any]:
+    """Compose the briefing: deterministic template, then LLM compression.
+
+    The LLM (role='summarizer') may only reorganize and compress the given
+    facts; adding new facts is forbidden. Any LLM failure falls back to the
+    plain template so the briefing endpoint never breaks.
+    """
+    template = _render_template(state)
+
+    factory = state.get("factory")
+    sems = state.get("semaphores")
+    if factory is None or sems is None:  # tests / bare invocation
+        return {"briefing_markdown": template}
+
+    try:
+        llm = factory.get_chat_model("summarizer")
+
+        async def _call() -> str:
+            messages = [
+                (
+                    "system",
+                    "You compose a pre-meeting briefing from the given facts. "
+                    "Reorganize and compress them for readability, but NEVER add "
+                    "any fact not present in the input. Keep every source meeting "
+                    "reference intact and keep the markdown headings.",
+                ),
+                ("user", template),
+            ]
+            resp = await invoke_llm("briefing.compose_briefing", "summarizer", llm, messages)
+            return str(resp.content)
+
+        raw = await sems.run("lmstudio-local", _call)
+        text = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        return {"briefing_markdown": text or template}
+    except Exception:  # noqa: BLE001 - compression is optional, template is the floor
+        logger.exception("LLM briefing compression failed; using template only")
+        return {"briefing_markdown": template}
 
 
 async def export_doc(state: BriefingState) -> dict[str, Any]:

@@ -28,6 +28,8 @@ COMMIT.md
 
 # Database
 *.db
+*.db-journal
+*.checkpoints.sqlite3
 
 # Frontend
 frontend/node_modules/

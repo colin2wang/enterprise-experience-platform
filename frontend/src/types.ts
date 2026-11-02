@@ -80,3 +80,16 @@ export interface ProviderHealth {
   chat_model_ready: boolean;
   detail: string | null;
 }
+
+export interface ModelInfoEntry {
+  "model-id": string;
+  provider: string;
+  model: string;
+  "display-name": string;
+  vendor: string;
+  description: string;
+  capabilities: string[];
+  "context-window": number;
+  "expected-context": number;
+  roles: { role: string; usage: string }[];
+}

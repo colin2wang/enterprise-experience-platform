@@ -18,11 +18,12 @@ from eep.api.params import parse_uuid as _parse_uuid
 from eep.ai_providers import ModelFactory, ProviderSemaphores
 from eep.checkpoints import get_checkpointer
 from eep.codes import next_experience_code
-from eep.config import load_ai_config
+from eep.config import load_ai_config, load_model_info
 from eep.db import get_session
 from eep.db.models import ExpMeeting, Experience, Extraction, Meeting, Project, User
 from eep.graphs.ingestion import build_ingestion_graph
 from eep.graphs.review import build_review_graph
+from eep.seed import seed as seed_demo_data
 from eep.memory.service import MemoryService
 from eep.schemas import (
     ExperienceOutLite,
@@ -151,6 +152,8 @@ async def push_meeting(
 
     # Run G1 in-process (AI writes only drafts; review still required).
     drafts: list[dict[str, Any]] = []
+    summary = ""
+    discussion = ""
     g1 = build_ingestion_graph().compile()
     try:
         state = await g1.ainvoke(
@@ -165,8 +168,15 @@ async def push_meeting(
             }
         )
         drafts = state.get("drafts", [])
+        summary = state.get("summary", "")
+        discussion = state.get("discussion", "")
     except Exception:  # noqa: BLE001 - ingestion failure must not lose the meeting
         logger.exception("G1 ingestion failed for meeting %s", m.id)
+
+    # Write the summarize-node output back onto the meeting row; without this
+    # the summary/discussion stay NULL even though the LLM produced them.
+    m.summary = summary
+    m.discussion = discussion
 
     # Persist one extraction row per draft; each becomes a G2 review thread.
     for draft in drafts:
@@ -174,7 +184,7 @@ async def push_meeting(
             Extraction(
                 meeting_id=m.id,
                 draft_json=draft,
-                model_ver=factory.cfg.roles["extractor"].primary if factory else None,
+                model_ver=factory.primary_model_id("extractor") if factory else None,
                 confidence=draft.get("confidence"),
                 review_status="pending",
             )
@@ -184,7 +194,7 @@ async def push_meeting(
             Extraction(
                 meeting_id=m.id,
                 draft_json={"status": "queued"},
-                model_ver=factory.cfg.roles["extractor"].primary if factory else None,
+                model_ver=factory.primary_model_id("extractor") if factory else None,
                 review_status="pending",
             )
         )
@@ -319,21 +329,34 @@ async def review_queue(
             }
             if thread_id not in getattr(review_queue, "_started", set()):
                 started: set[str] = getattr(review_queue, "_started", set())
-                g2 = build_review_graph().compile()
+                # Suggestions are generated once by the LLM and then persisted
+                # in draft_json, so restarts / re-visits never re-call the LLM.
+                stored = ext.draft_json.get("suggestions") if isinstance(ext.draft_json, dict) else None
+                # Checkpointer bound at compile() time (see review_submit).
+                g2 = build_review_graph().compile(checkpointer=await get_checkpointer())
                 try:
-                    await g2.ainvoke(
+                    state = await g2.ainvoke(
                         {
                             "thread_id": thread_id,
                             "meeting_id": str(ext.meeting_id),
                             "project_id": pid,
                             "draft": draft,
                             "similar": [],
-                            "suggestions": [],
+                            "suggestions": list(stored) if stored else [],
+                            "suggestions_from_store": bool(stored),
                             "change_log": [],
+                            "factory": factory,
+                            "semaphores": semaphores,
                         },
                         config={"configurable": {"thread_id": thread_id}},
-                        checkpointer=await get_checkpointer(),
                     )
+                    if not stored:
+                        generated = state.get("suggestions") or []
+                        if generated:
+                            draft_json = dict(ext.draft_json or {})
+                            draft_json["suggestions"] = generated
+                            ext.draft_json = draft_json
+                            session.add(ext)
                 except Exception:  # noqa: BLE001 - queue listing must not fail
                     logger.exception("Failed to start review thread %s", thread_id)
                 started.add(thread_id)
@@ -343,6 +366,7 @@ async def review_queue(
             items.append(
                 {"thread_id": thread_id, "draft": st["draft"], "similar": st.get("similar", [])}
             )
+    await session.commit()  # persist any newly generated suggestions
     return items
 
 
@@ -364,14 +388,35 @@ async def review_submit(
         raise HTTPException(status_code=422, detail="Rejection requires a reason")
 
     # Execute the G2 graph tail: apply_decision -> promote | reject.
-    g2 = build_review_graph().compile()
+    # NOTE: the checkpointer must be bound at compile() time — langgraph's
+    # ainvoke() does not accept it at call time, and resuming an interrupted
+    # thread (Command(resume=...)) without one raises RuntimeError.
     checkpointer = await get_checkpointer()
+    g2 = build_review_graph().compile(checkpointer=checkpointer)
     final = await g2.ainvoke(
         Command(resume=payload.model_dump(mode="json")),
         config={"configurable": {"thread_id": token}},
-        checkpointer=checkpointer,
     )
     outcome = final.get("outcome", "rejected")
+
+    # Persist the verdict on the extraction row regardless of outcome:
+    # review_status (pending -> accepted/rejected) plus the verdict payload,
+    # so accepted AND rejected drafts keep their review record in the DB and
+    # never re-appear in the queue after a restart.
+    if st.get("extraction_id"):
+        ext = await session.get(Extraction, st["extraction_id"])
+        if ext is not None:
+            ext.review_status = "accepted" if outcome == "promoted" else "rejected"
+            draft_json = dict(ext.draft_json or {})
+            draft_json["verdict"] = {
+                "decision": payload.decision,
+                "reason": payload.reason,
+                "reviewer_id": payload.reviewer_id,
+                "reviewed_at": datetime.now(UTC).isoformat(),
+            }
+            ext.draft_json = draft_json
+            session.add(ext)
+            await session.commit()
 
     result: dict[str, Any] = {}
     if outcome == "promoted":
@@ -459,9 +504,34 @@ async def briefing(
 
     g3 = build_briefing_graph().compile()
     state = await g3.ainvoke(
-        {"project_id": pid, "attention": attention, "open_actions": open_actions}
+        {
+            "project_id": pid,
+            "attention": attention,
+            "open_actions": open_actions,
+            "factory": factory,
+            "semaphores": semaphores,
+        }
     )
     return {"briefing_markdown": state.get("briefing_markdown", ""), "format": "markdown"}
+
+
+# --------------------------------------------------------------------- #
+# Demo data seeding (first-run UX: empty DB -> one-click demo dataset)
+# --------------------------------------------------------------------- #
+@router.post("/internal/seed-demo")
+async def seed_demo(
+    force: bool = Query(default=False), session: AsyncSession = Depends(get_session)
+) -> dict[str, Any]:
+    """Load the demo dataset from eep.seed into the database.
+
+    Idempotent: skips when the demo project already exists unless
+    ``force=true`` wipes and reseeds it.
+    """
+    counts = await seed_demo_data(session, force=force)
+    # seed() follows the "caller commits" convention; without this the demo
+    # data is rolled back when the request session closes.
+    await session.commit()
+    return {"seeded": True, **counts}
 
 
 # --------------------------------------------------------------------- #
@@ -483,6 +553,30 @@ async def reload_ai_config() -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------- #
+# Model info (catalog from model-info.yml, for the services page)
+# --------------------------------------------------------------------- #
+@router.get("/admin/model-info")
+async def model_info() -> dict[str, Any]:
+    """Return the model catalog (model-info.yml) plus role routing.
+
+    Each entry is annotated with the role(s) using it (primary/fallback),
+    so the UI can show which model serves which pipeline role.
+    """
+    mi = factory.model_info if factory else load_model_info()
+    role_usage: dict[str, list[dict[str, str]]] = {}
+    for role, routing in mi.roles.items():
+        role_usage.setdefault(routing.primary, []).append({"role": role, "usage": "primary"})
+        for mid in routing.fallback:
+            role_usage.setdefault(mid, []).append({"role": role, "usage": "fallback"})
+    entries = []
+    for e in mi.models:
+        d = e.model_dump()
+        d["roles"] = role_usage.get(e.model_id, [])
+        entries.append(d)
+    return {"models": entries, "roles": {r: rt.candidates() for r, rt in mi.roles.items()}}
+
+
+# --------------------------------------------------------------------- #
 # AI provider health (for Spring aggregation / "connected services" page)
 # --------------------------------------------------------------------- #
 @router.get("/admin/ai-providers/health")
@@ -491,10 +585,11 @@ async def ai_providers_health() -> list[dict[str, Any]]:
     from eep.ai_providers.health import probe
 
     cfg = load_ai_config()
+    model_info = factory.model_info if factory else load_model_info()
     reports = []
     breaker_states = factory.breaker_state() if factory else {}
     for p in cfg.providers:
-        report = await probe(p)
+        report = await probe(p, chat_models=model_info.chat_models_of(p.name))
         report_dict = report.__dict__.copy()
         report_dict["breaker_state"] = breaker_states.get(p.name, "closed")
         report_dict["last_probe_at"] = datetime.now(UTC).isoformat()

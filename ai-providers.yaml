@@ -1,5 +1,7 @@
 # ai-providers.yaml
-# Single source of truth for AI provider configuration.
+# Interface configuration ONLY (endpoints, timeouts, concurrency, breakers,
+# per-role behavior knobs). Which model each role uses is defined in
+# model-info.yml (model catalog + roles routing).
 # Shared by the Spring Boot backend (Spring AI) and this Python LangGraph service.
 # Author: Wang, Bing <colin2wang@gmail.com>
 
@@ -21,9 +23,6 @@ ai:
         tool-calls: partial
         json-schema: true
         embeddings: true
-      models:
-        chat: qwen2.5-32b-instruct
-        embed: bge-m3
 
     # 2) Ollama local service (OpenAI compatible /v1 endpoint).
     - name: ollama-local
@@ -39,31 +38,36 @@ ai:
         tool-calls: partial
         json-schema: true
         embeddings: true
-      models:
-        chat: qwen2.5:14b
-        embed: bge-m3
 
-  # Role-based routing: LangGraph nodes request models by role.
+  # Role-level behavior knobs only; model routing lives in model-info.yml.
   roles:
     extractor:
-      primary: lmstudio-local/qwen2.5-32b-instruct
-      fallback: [ollama-local/qwen2.5:14b]
       temperature: 0.1
       structured-output: json_schema
     summarizer:
-      primary: ollama-local/qwen2.5:14b
-      fallback: []
       temperature: 0.3
       structured-output: json_mode
+      # Light, latency-sensitive role: "none" is the only API-level switch
+      # that disables Qwen3 thinking on LM Studio (chat_template_kwargs is
+      # ignored by LM Studio's OpenAI-compatible path).
+      reasoning-effort: none
     linker:
-      primary: lmstudio-local/qwen2.5-32b-instruct
-      fallback: [ollama-local/qwen2.5:14b]
       temperature: 0.0
       structured-output: json_schema
     memory-manager:
-      primary: ollama-local/qwen2.5:14b
-      fallback: []
       temperature: 0.2
+      reasoning-effort: none
+
+  embeddings:
+    provider: lmstudio-local
+    model: bge-m3
+    dims: 1024
+    batch-size: 32
+
+  rerank:
+    provider: local-tei
+    base-url: http://localhost:8090
+    model: bge-reranker-v2-m3
 
   embeddings:
     provider: lmstudio-local

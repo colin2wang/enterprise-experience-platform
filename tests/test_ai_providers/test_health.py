@@ -56,13 +56,13 @@ def test_breaker_open_error_is_runtime_error() -> None:
 # ------------------------------------------------------------------ #
 # Health probe (httpx mocked)
 # ------------------------------------------------------------------ #
-def _provider(name: str = "lmstudio-local", chat: str = "qwen2.5-32b-instruct") -> Provider:
+def _provider(name: str = "lmstudio-local") -> Provider:
+    # Provider is interface-only now; chat models come from model-info.yml.
     return Provider(
         name=name,
         type="lmstudio",
         base_url="http://localhost:1234",
         api_key="k",
-        models={"chat": chat},
     )
 
 
@@ -76,7 +76,7 @@ async def test_probe_connected_reports_models(monkeypatch: pytest.MonkeyPatch) -
         )
 
     monkeypatch.setattr(httpx.AsyncClient, "get", _fake_get)
-    report = await probe(_provider())
+    report = await probe(_provider(), chat_models={"qwen2.5-32b-instruct"})
     assert report.status == "connected"
     assert report.models == ["qwen2.5-32b-instruct", "bge-m3"]
     assert report.chat_model_ready is True
@@ -88,7 +88,7 @@ async def test_probe_chat_model_not_listed(monkeypatch: pytest.MonkeyPatch) -> N
         return httpx.Response(200, request=request, json={"data": [{"id": "other-model"}]})
 
     monkeypatch.setattr(httpx.AsyncClient, "get", _fake_get)
-    report = await probe(_provider())
+    report = await probe(_provider(), chat_models={"qwen2.5-32b-instruct"})
     assert report.status == "connected"
     assert report.chat_model_ready is False
 

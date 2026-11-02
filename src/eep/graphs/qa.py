@@ -10,10 +10,14 @@ Author: Wang, Bing <colin2wang@gmail.com>
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
+
+from eep.ai_providers.llm_log import invoke_llm
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,7 @@ class QAState(TypedDict, total=False):
     answer: str
     citations: list[dict[str, Any]]
     factory: Any
+    semaphores: Any                 # ProviderSemaphores (injected by the API layer)
 
 
 async def route(state: QAState) -> dict[str, Any]:
@@ -49,21 +54,69 @@ async def hybrid_retrieve(state: QAState) -> dict[str, Any]:
     return {}
 
 
+def _grounded_fallback(hits: list[dict[str, Any]]) -> str:
+    """Deterministic bullet answer; used when no LLM is available or it fails."""
+    return "\n".join(f"- {h.get('title', '')}" for h in hits) if hits else (
+        "No relevant experience found in the library."
+    )
+
+
 async def answer_with_citations(state: QAState) -> dict[str, Any]:
-    """Answer grounded ONLY in retrieved hits; each claim cites meeting+span."""
+    """Answer grounded ONLY in retrieved hits; each claim cites meeting+span.
+
+    The LLM (role='summarizer') composes a readable answer from the hit list
+    but must not introduce facts; citations are always derived from the hits
+    themselves. Any LLM failure falls back to the bullet list.
+    """
     hits = state.get("hits", [])
-    lines: list[str] = []
-    citations: list[dict[str, Any]] = []
-    for h in hits:
-        lines.append(f"- {h.get('title', '')}")
-        citations.append(
+    citations: list[dict[str, Any]] = [
+        {
+            "meeting_id": h.get("source_meeting_id"),
+            "span": h.get("source_span", {}),
+        }
+        for h in hits
+    ]
+
+    factory = state.get("factory")
+    sems = state.get("semaphores")
+    if factory is None or sems is None or not hits:  # tests / bare invocation / no evidence
+        return {"answer": _grounded_fallback(hits), "citations": citations}
+
+    try:
+        llm = factory.get_chat_model("summarizer")
+        context = [
             {
+                "title": h.get("title", ""),
+                "description": h.get("description", ""),
                 "meeting_id": h.get("source_meeting_id"),
                 "span": h.get("source_span", {}),
             }
-        )
-    answer = "\n".join(lines) if lines else "No relevant experience found in the library."
-    return {"answer": answer, "citations": citations}
+            for h in hits
+        ]
+
+        async def _call() -> str:
+            messages = [
+                (
+                    "system",
+                    "You answer questions strictly from the provided experience "
+                    "library hits. Never add facts beyond them. Reference each "
+                    "claim with its meeting_id (cite as [meeting <id>]).",
+                ),
+                (
+                    "user",
+                    f"Question: {state.get('question', '')}\n\n"
+                    f"Hits:\n{json.dumps(context, ensure_ascii=False, default=str)}",
+                ),
+            ]
+            resp = await invoke_llm("qa.answer_with_citations", "summarizer", llm, messages)
+            return str(resp.content)
+
+        raw = await sems.run("lmstudio-local", _call)
+        answer = re.sub(r"^```(?:markdown)?\s*|\s*```$", "", raw.strip(), flags=re.MULTILINE).strip()
+        return {"answer": answer or _grounded_fallback(hits), "citations": citations}
+    except Exception:  # noqa: BLE001 - Q&A must degrade, not fail
+        logger.exception("LLM QA answer failed; using grounded bullet list")
+        return {"answer": _grounded_fallback(hits), "citations": citations}
 
 
 async def record_query_memory(state: QAState) -> dict[str, Any]:

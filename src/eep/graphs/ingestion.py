@@ -13,6 +13,7 @@ Author: Wang, Bing <colin2wang@gmail.com>
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Annotated, Any, Literal, TypedDict
 
@@ -20,6 +21,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
 from eep.ai_providers import ModelFactory, ProviderSemaphores
+from eep.ai_providers.llm_log import invoke_llm
 from eep.graphs.extraction_prompt import (
     EXTRACT_SYSTEM_PROMPT,
     build_extract_user_prompt,
@@ -58,6 +60,34 @@ class IngestionState(TypedDict, total=False):
 # --------------------------------------------------------------------- #
 # Nodes
 # --------------------------------------------------------------------- #
+def _parse_summary_reply(raw: str) -> dict[str, str] | None:
+    """Parse the summarizer reply as ``{"summary", "discussion"}``.
+
+    The summarizer does NOT follow the extraction schema, so it must not go
+    through ``parse_extraction_text`` — that would validate against
+    ``ExtractionOutput`` and silently yield empty items (and therefore empty
+    summary/discussion) for a perfectly good reply.
+    """
+    text = raw.strip()
+    if text.startswith("```"):  # strip Markdown code fences
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 :]
+        if text.endswith("```"):
+            text = text[:-3]
+    try:
+        data = json.loads(text.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    summary = str(data.get("summary") or "").strip()
+    discussion = str(data.get("discussion") or "").strip()
+    if not summary and not discussion:
+        return None
+    return {"summary": summary, "discussion": discussion}
+
+
 async def summarize(state: IngestionState) -> dict[str, Any]:
     """Summarize the transcript into Summary/Discussion structure (light model)."""
     factory: ModelFactory = state["factory"]
@@ -65,21 +95,19 @@ async def summarize(state: IngestionState) -> dict[str, Any]:
     llm = factory.get_chat_model("summarizer")
 
     async def _call() -> str:
-        resp = await llm.ainvoke(
+        messages = (
             "Split the meeting transcript below into two sections.\n"
             'Return JSON: {"summary": "...", "discussion": "..."}\n\n'
             f"Transcript:\n{state['transcript'][:12000]}"
         )
+        resp = await invoke_llm("ingestion.summarize", "summarizer", llm, messages)
         return str(resp.content)
 
     raw = await sems.run("ollama-local", _call)
-    parsed = parse_extraction_text(raw)
+    parsed = _parse_summary_reply(raw)
     if parsed is None:
         return {"errors": ["summarize: unparseable LLM output"]}
-    items = parsed.items
-    summary = items[0].description or "" if items else ""
-    discussion = items[1].description or "" if len(items) > 1 else ""
-    return {"summary": summary, "discussion": discussion}
+    return {"summary": parsed["summary"], "discussion": parsed["discussion"]}
 
 
 def chunk_split(state: IngestionState) -> dict[str, Any]:
@@ -118,16 +146,15 @@ async def extract_experiences(task_state: dict[str, Any]) -> dict[str, Any]:
     llm = factory.get_chat_model("extractor")
 
     async def _call() -> str:
-        resp = await llm.ainvoke(
-            [
-                ("system", EXTRACT_SYSTEM_PROMPT),
-                ("user", build_extract_user_prompt(chunk["text"], similar="")),
-            ]
-        )
+        messages = [
+            ("system", EXTRACT_SYSTEM_PROMPT),
+            ("user", build_extract_user_prompt(chunk["text"], similar="")),
+        ]
+        resp = await invoke_llm("ingestion.extract_experiences", "extractor", llm, messages)
         return str(resp.content)
 
     raw = await sems.run("lmstudio-local", _call)
-    parsed = parse_extraction_text(raw)
+    parsed = parse_extraction_text(raw, chunk=chunk["text"])
     if parsed is None:
         return {"errors": [f"extract_experiences(chunk@{chunk['start']}): parse failed"]}
     drafts: list[dict[str, Any]] = []

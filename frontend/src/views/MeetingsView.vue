@@ -7,6 +7,7 @@ import { statusLabel } from "../labels";
 import type { Meeting } from "../types";
 import MeetingDetail from "../components/MeetingDetail.vue";
 import { openDrawer } from "../drawer";
+import { MEETING_SAMPLES } from "../samples";
 
 const meetings = ref<Meeting[]>([]);
 const error = ref("");
@@ -39,6 +40,14 @@ const showForm = ref(false);
 const submitting = ref(false);
 const formError = ref("");
 const form = ref({ title: "", meet_date: "", participants: "", transcript_text: "" });
+
+/* Sample picker: prefills the form with a fake meeting; everything stays editable. */
+function loadSample(e: Event) {
+  const name = (e.target as HTMLSelectElement).value;
+  const s = MEETING_SAMPLES.find((s) => s.name === name);
+  if (!s) return;
+  form.value = { title: s.title, meet_date: s.meetDate, participants: s.participants, transcript_text: s.transcript };
+}
 
 function toggleForm() {
   showForm.value = !showForm.value;
@@ -88,6 +97,13 @@ async function submitMeeting() {
     </div>
 
     <div v-if="showForm" class="review-item" style="margin-bottom: 14px">
+      <div class="toolbar" style="margin-bottom: 8px; align-items: center">
+        <select class="field" style="width: auto" @change="loadSample($event)">
+          <option value="">Load a sample meeting...</option>
+          <option v-for="s in MEETING_SAMPLES" :key="s.name" :value="s.name">{{ s.name }}</option>
+        </select>
+        <span class="meta" style="line-height: 32px">Picking a sample prefills the form below — edit anything before submitting.</span>
+      </div>
       <dl class="kv">
         <dt>Title</dt><dd><input v-model="form.title" class="field" placeholder="Meeting title" /></dd>
         <dt>Date</dt><dd><input v-model="form.meet_date" type="date" class="field" /></dd>

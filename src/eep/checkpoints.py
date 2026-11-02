@@ -30,14 +30,25 @@ async def get_checkpointer() -> BaseCheckpointSaver:
     if _checkpointer is not None:
         return _checkpointer
     settings = Settings()
-    # SQLite dev default: skip the Postgres saver entirely and keep review
-    # state in-process (review threads do not survive restarts in dev mode).
+    # SQLite dev default: a file-backed saver so review threads (interrupt
+    # state) survive restarts just like they do with Postgres in production.
     if settings.database_url.startswith("sqlite"):
-        from langgraph.checkpoint.memory import InMemorySaver
+        try:
+            from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
-        _checkpointer = InMemorySaver()
-        logger.info("Checkpointer: InMemorySaver (sqlite dev mode)")
-        return _checkpointer
+            path = "eep.checkpoints.sqlite3"
+            saver = AsyncSqliteSaver.from_conn_string(path)
+            cm = await saver.__aenter__() if hasattr(saver, "__aenter__") else saver
+            await cm.setup()  # create checkpoint tables
+            _checkpointer = cm
+            logger.info("Checkpointer: AsyncSqliteSaver (%s)", path)
+            return _checkpointer
+        except Exception as exc:  # noqa: BLE001 - dev fallback
+            from langgraph.checkpoint.memory import InMemorySaver
+
+            _checkpointer = InMemorySaver()
+            logger.warning("SQLite checkpointer unavailable (%s); using InMemorySaver", exc)
+            return _checkpointer
     try:
         from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 

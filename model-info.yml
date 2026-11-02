@@ -1,0 +1,96 @@
+# ============================================================================
+# Model catalog & descriptions (displayed by the web UI)
+# ----------------------------------------------------------------------------
+# This file is optional: delete it and role routing falls back to the models
+# declared in ai-providers.yaml (which holds interface info only).
+#   - Keyed by model-id (primary key), convention '{provider}:{model}';
+#     provider maps to providers[].name in ai-providers.yaml;
+#     model is the id exposed by the inference server (for LM Studio this is
+#     the IDENTIFIER column of `lms ps`);
+#   - List order is the frontend display order;
+#   - capabilities is a list: text / vision / reasoning;
+#   - context-window / expected-context follow the CONTEXT column of
+#     LM Studio `lms ps` (loaded runtime context).
+# ============================================================================
+
+models:
+  - model-id: lmstudio-local:qwen/qwen3.8-27b
+    provider: lmstudio-local
+    model: qwen/qwen3.8-27b
+    display-name: Qwen3.8-27B
+    vendor: Qwen
+    description: Local Qwen 3.8 27B with thinking mode, ~17.74 GB VRAM; first choice for roles needing stronger reasoning such as extraction and chain explanation
+    capabilities:
+      - text
+      - reasoning
+    context-window: 32768
+    expected-context: 32768
+
+  - model-id: lmstudio-local:qwen/qwen3-8b
+    provider: lmstudio-local
+    model: qwen/qwen3-8b
+    display-name: Qwen3-8B
+    vendor: Qwen
+    description: Local Qwen 3 8B with thinking mode, ~5.03 GB VRAM; extraction and summarization for medium-length meeting transcripts
+    capabilities:
+      - text
+      - reasoning
+    context-window: 16384
+    expected-context: 16384
+
+  - model-id: lmstudio-local:qwen/qwen3-4b
+    provider: lmstudio-local
+    model: qwen/qwen3-4b
+    display-name: Qwen3-4B (light)
+    vendor: Qwen
+    description: Local Qwen 3 4B, ~2.50 GB VRAM; summarization and memory management, low temperature and low latency
+    capabilities:
+      - text
+      - reasoning
+    context-window: 16384
+    expected-context: 16384
+
+  - model-id: lmstudio-local:qwen/qwen3-1.7b
+    provider: lmstudio-local
+    model: qwen/qwen3-1.7b
+    display-name: Qwen3-1.7B (lightweight)
+    vendor: Qwen
+    description: Lightweight model, ~1.67 GB VRAM; simple Q&A and short texts, lowest latency
+    capabilities:
+      - text
+      - reasoning
+    context-window: 8192
+    expected-context: 8192
+
+  - model-id: lmstudio-local:qwen/qwen3-vl-8b
+    provider: lmstudio-local
+    model: qwen/qwen3-vl-8b
+    display-name: Qwen3-VL-8B (vision)
+    vendor: Qwen
+    description: Vision-language model, reserved for multimodal processing of screenshots / image-based meeting material
+    capabilities:
+      - vision
+      - text
+      - reasoning
+    context-window: 16384
+    expected-context: 16384
+
+# ---------------------------------------------------------------------------
+# Role routing: key is the LangGraph role, value is a model-id from the
+# catalog above ({provider}:{model}). primary is required, fallback is
+# optional (tried in order). Behavior knobs (temperature / structured-output)
+# still live in ai-providers.yaml.
+# ---------------------------------------------------------------------------
+roles:
+  extractor:
+    primary: lmstudio-local:qwen/qwen3-8b
+    fallback: [lmstudio-local:qwen/qwen3-4b]
+  summarizer:
+    primary: lmstudio-local:qwen/qwen3-4b
+    fallback: []
+  linker:
+    primary: lmstudio-local:qwen/qwen3-8b
+    fallback: [lmstudio-local:qwen/qwen3-4b]
+  memory-manager:
+    primary: lmstudio-local:qwen/qwen3-4b
+    fallback: []

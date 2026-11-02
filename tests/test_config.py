@@ -29,10 +29,15 @@ def test_kebab_case_aliases() -> None:
 
 
 def test_role_primary_format() -> None:
+    from eep.config import load_model_info
+
     cfg = load_ai_config(CFG)
-    extractor = cfg.roles["extractor"]
-    assert "/" in extractor.primary
-    assert extractor.fallback  # extractor has a fallback chain
+    # Behavior knobs live in ai-providers.yaml; routing comes from model-info.yml.
+    assert "extractor" in cfg.roles
+    assert cfg.roles["extractor"].structured_output == "json_schema"
+    routing = load_model_info().roles["extractor"]
+    assert ":" in routing.primary  # "{provider}:{model}" catalog id
+    assert routing.fallback  # extractor has a fallback chain
 
 
 def test_invalid_yaml_rejected(tmp_path: Path) -> None:

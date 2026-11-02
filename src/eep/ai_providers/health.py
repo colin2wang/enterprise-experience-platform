@@ -63,11 +63,14 @@ class HealthReport:
     detail: str = ""
 
 
-async def probe(provider: Provider) -> HealthReport:
+async def probe(provider: Provider, chat_models: set[str] | None = None) -> HealthReport:
     """Probe an OpenAI-compatible provider via ``GET {base}/v1/models``.
 
     Args:
         provider: The provider entry to probe.
+        chat_models: Model names the catalog assigns to this provider
+            (from ``model-info.yml``); when given, ``chat_model_ready``
+            reports whether the server serves at least one of them.
 
     Returns:
         A :class:`HealthReport` describing reachability and model readiness.
@@ -80,11 +83,12 @@ async def probe(provider: Provider) -> HealthReport:
             resp.raise_for_status()
             data = resp.json().get("data", [])
             models = [m.get("id", "") for m in data if isinstance(m, dict)]
+            ready = bool(chat_models & set(models)) if chat_models is not None else False
             return HealthReport(
                 provider=provider.name,
                 status="connected",
                 models=models,
-                chat_model_ready=provider.models.get("chat") in models,
+                chat_model_ready=ready,
             )
     except Exception as exc:  # noqa: BLE001 - probe must never raise
         return HealthReport(

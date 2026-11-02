@@ -6,5 +6,10 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 
 Push-Location "$root/frontend"
-pnpm run dev
-Pop-Location
+try {
+    pnpm run dev
+}
+finally {
+    # Always restore the original directory, even after Ctrl+C.
+    Pop-Location
+}
