@@ -1,0 +1,62 @@
+# EEP deployment topology (design doc 10.1).
+# Author: Wang, Bing <colin2wang@gmail.com>
+#
+# ai-providers.yaml is volume-mounted into both api and ai-worker as the
+# single source of truth. LM Studio / Ollama / TEI run on the host (GPU),
+# so services reach them via host.docker.internal.
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: eep
+      POSTGRES_PASSWORD: eep
+      POSTGRES_DB: eep
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations/001_schema.sql:/docker-entrypoint-initdb.d/001_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eep"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: eep
+      MINIO_ROOT_PASSWORD: eeppassword
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+
+  ai-worker:
+    build: .
+    command: uvicorn eep.main:app --host 0.0.0.0 --port 8100
+    environment:
+      EEP_DATABASE_URL: postgresql+asyncpg://eep:eep@postgres:5432/eep
+      EEP_REDIS_URL: redis://redis:6379/0
+      EEP_AI_PROVIDERS_PATH: /config/ai-providers.yaml
+      EEP_STORAGE_ENDPOINT: http://minio:9000
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./ai-providers.yaml:/config/ai-providers.yaml:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+volumes:
+  pgdata:
+  minio-data:

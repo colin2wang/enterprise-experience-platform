@@ -1,0 +1,5 @@
+# Repository-wide: normalize all text files to LF for stable cross-platform diffs
+* text=auto eol=lf
+
+# No Windows scripts (.ps1/.bat/.cmd) or binary assets exist in this repo yet;
+# declare CRLF / binary exceptions here when the first one is added.

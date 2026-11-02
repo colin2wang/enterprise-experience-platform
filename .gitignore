@@ -1,0 +1,36 @@
+# Python virtualenv (pyproject-managed deps, reproducible from pyproject.toml)
+.venv/
+
+# Python bytecode / packaging artifacts
+__pycache__/
+*.egg-info/
+build/
+dist/
+
+# Design Plans
+docs/plans/
+
+# Test / tool caches
+.pytest_cache/
+
+# Local environment overrides (DB URLs, keys)
+.env
+.env.*
+
+# JetBrains IDE (per-machine workspace state)
+.idea/
+
+# AtomCode per-project local state
+.atomcode/
+
+# Local commit-message draft (never committed)
+COMMIT.md
+
+# Database
+*.db
+
+# Frontend
+frontend/node_modules/
+web/assets/
+run-web.*.log
+.backend.*.log

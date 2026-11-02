@@ -1,0 +1,60 @@
+# eep.yml
+# EEP AI pipeline service configuration.
+# Author: Wang, Bing <colin2wang@gmail.com>
+#
+# HOW IT WORKS
+# ------------
+# Precedence (highest first):
+#   1. Environment variables   EEP_<FIELD>  e.g. EEP_DATABASE_URL, EEP_HOST, EEP_PORT
+#   2. This file (eep.yml)     flat keys below
+#   3. Built-in defaults       (sqlite, loopback binding)
+#
+# The file is optional: delete it and the service still boots with defaults.
+
+# ------------------------------------------------------------------ #
+# HTTP service binding
+# ------------------------------------------------------------------ #
+# host is bound to loopback only by default (127.0.0.1 == localhost),
+# so neither the API nor the web UI is reachable from other machines.
+host: 127.0.0.1
+port: 8100
+
+# ------------------------------------------------------------------ #
+# Database  --  choose SQLite OR PostgreSQL by editing database-url
+# ------------------------------------------------------------------ #
+# SQLite (DEFAULT). Zero setup: on startup the service creates the file
+# and auto-initializes ALL tables (no SQL script needed).
+#   - "sqlite+aiosqlite:///./eep.db"     -> file  ./eep.db (repo root)
+#   - "sqlite+aiosqlite:///:memory:"     -> in-memory, wiped on restart
+# Requires the aiosqlite driver (installed with the package).
+database-url: sqlite+aiosqlite:///./eep.db
+
+# PostgreSQL 16 + pgvector (production choice; supports HNSW vector search).
+# To switch, comment out the line above and uncomment the one below,
+# then run migrations/001_schema.sql once to create the schema:
+#   psql -U eep -d eep -f migrations/001_schema.sql
+# database-url: postgresql+asyncpg://eep:eep@localhost:5432/eep
+
+# ------------------------------------------------------------------ #
+# Redis (cache / locks / rate limit). Optional in dev; the service
+# does not fail at startup when Redis is unreachable.
+# ------------------------------------------------------------------ #
+redis-url: redis://localhost:6379/0
+
+# ------------------------------------------------------------------ #
+# AI provider configuration file (single source of truth shared with
+# the Spring Boot backend; see ai-providers.yaml for its own docs).
+# ------------------------------------------------------------------ #
+ai-providers-path: ai-providers.yaml
+
+# ------------------------------------------------------------------ #
+# Object storage (MinIO/S3) for meeting transcripts
+# ------------------------------------------------------------------ #
+storage-endpoint: http://localhost:9000
+storage-bucket: eep
+
+# ------------------------------------------------------------------ #
+# Retrieval knobs
+# ------------------------------------------------------------------ #
+vector-top-k: 50        # pgvector recall width before rerank
+rerank-top-k: 8         # final hit count after bge-reranker
